@@ -127,7 +127,37 @@ section:last-of-type{border-bottom:0}
   padding:5px 8px;
   display:flex; align-items:center; gap:8px;
   flex-shrink:0;
+  cursor:pointer;
+  transition:border-color .12s, background .12s;
 }
+.dash-bal-acct:hover{border-color:var(--ink-3)}
+.dash-bal-acct.active{
+  border-color:var(--gold);
+  background:color-mix(in srgb, var(--gold-soft) 55%, var(--paper));
+}
+.dash-bal-acct.live-active{
+  border-color:var(--equity);
+  background:color-mix(in srgb, var(--equity-soft) 55%, var(--paper));
+}
+.acct-multi{
+  display:flex; flex-wrap:wrap; gap:8px;
+  padding:8px 10px; min-height:42px;
+  background:var(--paper); border:1px solid var(--rule); border-radius:3px;
+}
+.acct-multi-empty{font-size:.85rem; color:var(--ink-3); align-self:center}
+.acct-check{
+  display:inline-flex; align-items:center; gap:6px;
+  padding:5px 10px; border:1px solid var(--rule); border-radius:3px;
+  background:var(--panel); font-size:.8rem; cursor:pointer; user-select:none;
+}
+.acct-check:hover{border-color:var(--ink-3)}
+.acct-check input{margin:0; accent-color:var(--gold)}
+.acct-check.on{border-color:var(--gold); background:color-mix(in srgb, var(--gold-soft) 40%, var(--panel))}
+.acct-multi-actions{display:flex; gap:8px; margin-top:6px; flex-wrap:wrap}
+.acct-multi-actions button{font-size:.75rem; padding:4px 10px}
+.acct-multi-hint{font-size:.75rem; color:var(--ink-3); margin-top:6px}
+#fAccountNameEditWrap{display:none}
+
 .dash-bal-acct .no{
   font-size:.6rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
   color:var(--ink-3); flex:0 0 auto; min-width:2rem;
@@ -624,6 +654,10 @@ table.tight th{font-size:.68rem; letter-spacing:0}
       <option value="live" selected>Live Trading</option>
       <option value="prop">Prop Firm Funded</option>
     </select>
+    <label for="globalAccountNameFilter" style="margin:0; font-size:.85rem; color:var(--ink-3)">Account</label>
+    <select id="globalAccountNameFilter" class="cal-select" style="min-width:180px">
+      <option value="">All accounts</option>
+    </select>
     <span id="globalAccountHint" style="font-size:.8rem; color:var(--ink-3)"></span>
   </div>
 
@@ -971,9 +1005,21 @@ table.tight th{font-size:.68rem; letter-spacing:0}
     </div>
     <div class="entry">
       <div class="fields">
-        <div><label for="fDate">Date</label><input type="date" id="fDate" value="2026-07-22"></div>
+        <div><label for="fDate">Date</label><input type="date" id="fDate" value=""></div>
         <div><label for="fAccountType">Account type</label><select id="fAccountType"><option value="live">Live Trading</option><option value="prop">Prop Firm Funded</option></select></div>
-        <div><label for="fAccountName">Account name</label><select id="fAccountName"></select></div>
+        <div id="fAccountNameEditWrap" style="min-width:180px">
+          <label for="fAccountName">Account name</label>
+          <select id="fAccountName"></select>
+        </div>
+        <div id="fAccountNameMultiWrap" style="grid-column:1 / -1; min-width:0">
+          <label>Accounts <span style="font-weight:400; color:var(--ink-3)">(select one or more — copy trades across accounts)</span></label>
+          <div class="acct-multi" id="fAccountNameMulti"></div>
+          <div class="acct-multi-actions">
+            <button class="btn" type="button" id="acctSelectAllBtn">Select all</button>
+            <button class="btn" type="button" id="acctSelectNoneBtn">Clear</button>
+          </div>
+          <div class="acct-multi-hint" id="fAccountNameMultiHint">Tick every account this trade was taken on. One journal entry is created per selected account.</div>
+        </div>
         <div><label for="fSymbol">Symbol</label>
           <select id="fSymbol"></select>
         </div>
@@ -1142,6 +1188,7 @@ const ACCOUNT_PROP = "prop";
 let accountPageView = "live";
 let accountTradeView = "ALL";
 let globalAccountView = "live"; // Dashboard, Performance, Calendar, Trades, Insights — live or prop only
+let globalAccountName = ""; // "" = all accounts of the selected type; otherwise a specific account name
 let FULL_TRADES = [];
 
 const PROP_ACCOUNTS_KEY = "tradeLedger.propAccounts";
@@ -1275,16 +1322,35 @@ function renderLiveAccountChips(){
     ).join("");
   }
 }
+function getSelectedAccountNames(){
+  if(editingTradeId){
+    const sel = document.getElementById("fAccountName");
+    const v = (sel && sel.value || "").trim();
+    return v ? [v] : [];
+  }
+  return [...document.querySelectorAll("#fAccountNameMulti input[type=checkbox]:checked")].map(c => c.value);
+}
+function setAccountPickerMode(){
+  const editWrap = document.getElementById("fAccountNameEditWrap");
+  const multiWrap = document.getElementById("fAccountNameMultiWrap");
+  const isEdit = !!editingTradeId;
+  if(editWrap) editWrap.style.display = isEdit ? "block" : "none";
+  if(multiWrap) multiWrap.style.display = isEdit ? "none" : "block";
+}
 function renderAccountNameSelect(){
   const sel = document.getElementById("fAccountName");
   const typeSel = document.getElementById("fAccountType");
-  if(!sel || !typeSel) return;
+  const multi = document.getElementById("fAccountNameMulti");
+  if(!typeSel) return;
   const type = typeSel.value;
-  const prev = sel.value;
-  if(type === ACCOUNT_LIVE){
-    const list = liveAccountNames();
+  const list = type === ACCOUNT_LIVE ? liveAccountNames() : propAccountNames();
+  setAccountPickerMode();
+
+  // Single select (edit mode)
+  if(sel){
+    const prev = sel.value;
     if(!list.length){
-      sel.innerHTML = '<option value="">Add a live account on the Accounts page first</option>';
+      sel.innerHTML = '<option value="">Add an account on the Accounts page first</option>';
       sel.disabled = true;
     } else {
       sel.innerHTML = list.map(s => '<option value="'+esc(s)+'">'+esc(s)+'</option>').join("");
@@ -1292,30 +1358,51 @@ function renderAccountNameSelect(){
       else sel.value = list[0];
       sel.disabled = false;
     }
-  } else {
-    const list = propAccountNames();
+  }
+
+  // Multi checkbox list (add mode)
+  if(multi){
     if(!list.length){
-      sel.innerHTML = '<option value="">Add a prop account on the Accounts page first</option>';
-      sel.disabled = true;
+      multi.innerHTML = '<div class="acct-multi-empty">Add accounts on the Accounts page first.</div>';
     } else {
-      sel.innerHTML = list.map(s => '<option value="'+esc(s)+'">'+esc(s)+'</option>').join("");
-      if(prev && list.includes(prev)) sel.value = prev;
-      else sel.value = list[0];
-      sel.disabled = false;
+      const checked = new Set(getSelectedAccountNames());
+      // On fresh render with nothing checked, leave unchecked so user chooses deliberately
+      multi.innerHTML = list.map(s => {
+        const on = checked.has(s);
+        return '<label class="acct-check'+(on?" on":"")+'"><input type="checkbox" value="'+esc(s)+'"'+(on?" checked":"")+'> '+esc(s)+'</label>';
+      }).join("");
+      multi.querySelectorAll("input[type=checkbox]").forEach(cb => {
+        cb.addEventListener("change", () => {
+          cb.closest(".acct-check").classList.toggle("on", cb.checked);
+        });
+      });
     }
   }
 }
-function renderAccountStartSide(list){
+function renderGlobalAccountNameFilter(){
+  const sel = document.getElementById("globalAccountNameFilter");
+  if(!sel) return;
+  const list = globalAccountView === ACCOUNT_PROP ? propAccountNames() : liveAccountNames();
+  const prev = globalAccountName;
+  let html = '<option value="">All accounts</option>';
+  list.forEach(n => { html += '<option value="'+esc(n)+'">'+esc(n)+'</option>'; });
+  sel.innerHTML = html;
+  if(prev && list.includes(prev)) sel.value = prev;
+  else { sel.value = ""; globalAccountName = ""; }
+}
+function renderAccountStartSide(list, type){
   if(!list.length){
     return '<div class="dash-bal-empty">No accounts yet. Add them on the Accounts page.</div>';
   }
-  return list.map((a, i) =>
-    '<div class="dash-bal-acct">'+
+  return list.map((a, i) => {
+    const active = globalAccountView === type && globalAccountName === a.name;
+    const actCls = active ? (type === ACCOUNT_LIVE ? " live-active active" : " active") : "";
+    return '<div class="dash-bal-acct'+actCls+'" data-account-type="'+type+'" data-account-name="'+esc(a.name)+'" title="Show Closing Balance & Headline Metrics for '+esc(a.name)+' only">'+
       '<div class="no">No. '+(i+1)+'</div>'+
       '<div class="name">'+esc(a.name)+'</div>'+
       '<div class="amt num">'+usd(a.startBalance)+'</div>'+
-    '</div>'
-  ).join("");
+    '</div>';
+  }).join("");
 }
 function renderDashboardStartBalances(){
   const liveList = loadLiveAccounts();
@@ -1328,8 +1415,16 @@ function renderDashboardStartBalances(){
   const propBd = document.getElementById("propStartBalBreakdown");
   if(liveDisp) liveDisp.textContent = usd(liveTotal);
   if(propDisp) propDisp.textContent = usd(propTotal);
-  if(liveBd) liveBd.innerHTML = renderAccountStartSide(liveList);
-  if(propBd) propBd.innerHTML = renderAccountStartSide(propList);
+  if(liveBd) liveBd.innerHTML = renderAccountStartSide(liveList, ACCOUNT_LIVE);
+  if(propBd) propBd.innerHTML = renderAccountStartSide(propList, ACCOUNT_PROP);
+}
+function selectDashboardAccount(type, name){
+  globalAccountView = type;
+  // Toggle: click same account again → back to all accounts of that type
+  if(globalAccountName === name) globalAccountName = "";
+  else globalAccountName = name || "";
+  calYear = null; calMonth = null;
+  render();
 }
 function computePropLimitStats(account, trades, startBal){
   const start = (isFinite(startBal) && startBal > 0) ? startBal : 0;
@@ -1892,15 +1987,27 @@ function getAllRawTrades(){
   return loadAdded();
 }
 function filterRawByAccount(raw, view){
-  if(view === "all") return raw;
-  return raw.filter(t => (t.accountType || ACCOUNT_LIVE) === view);
+  let out = raw;
+  if(view !== "all") out = out.filter(t => (t.accountType || ACCOUNT_LIVE) === view);
+  if(globalAccountName) out = out.filter(t => (t.accountName || "") === globalAccountName);
+  return out;
 }
 function accountViewLabel(view){
   if(view === "live") return "Live Trading";
   if(view === "prop") return "Prop Firm Funded";
   return "All accounts";
 }
+function accountNameStartBalance(type, name){
+  if(!name) return null;
+  const list = type === ACCOUNT_PROP ? loadPropAccounts() : loadLiveAccounts();
+  const acc = list.find(a => a.name === name);
+  return acc ? (acc.startBalance || 0) : null;
+}
 function startBalanceForView(view){
+  if(globalAccountName){
+    const specific = accountNameStartBalance(view === "prop" ? ACCOUNT_PROP : ACCOUNT_LIVE, globalAccountName);
+    if(specific != null) return specific;
+  }
   if(view === "prop") return PROP_START_BALANCE;
   if(view === "all") return START_BALANCE + PROP_START_BALANCE;
   return START_BALANCE; // live
@@ -1927,13 +2034,17 @@ function render(){
 
   const gaf = document.getElementById("globalAccountFilter");
   if(gaf && document.activeElement !== gaf) gaf.value = globalAccountView;
+  renderGlobalAccountNameFilter();
+  const ganf = document.getElementById("globalAccountNameFilter");
+  if(ganf && document.activeElement !== ganf) ganf.value = globalAccountName || "";
   const hint = document.getElementById("globalAccountHint");
   if(hint){
-    hint.textContent = "Showing only " + accountViewLabel(globalAccountView) + " trades.";
+    const namePart = globalAccountName ? (" · " + globalAccountName) : "";
+    hint.textContent = "Showing only " + accountViewLabel(globalAccountView) + namePart + " trades. Click an account on the Dashboard to drill into it.";
   }
 
   const symLabel = uniqueSymbols().length ? esc(uniqueSymbols().join(" \u00b7 ")) + " &middot; " : "";
-  const viewTag = globalAccountView === "all" ? "" : (" · " + accountViewLabel(globalAccountView));
+  const viewTag = globalAccountView === "all" ? "" : (" · " + accountViewLabel(globalAccountView) + (globalAccountName ? (" · " + globalAccountName) : ""));
   document.getElementById("mastheadSub").innerHTML =
     symLabel + "compounded from a $" + viewStart.toFixed(2) +
     " starting balance" + viewTag + " &middot; " + (S.first ? nice(S.first) + " to " + nice(S.last) : "no trades logged yet");
@@ -1943,7 +2054,7 @@ function render(){
   document.getElementById("heroMeta").innerHTML = !S.n
     ? "No trades in this view. The balance above is the starting balance for this account."
     : "<strong>" + usd(S.net) + "</strong> net across " + S.n + " closed trades" +
-      (globalAccountView !== "all" ? " (" + accountViewLabel(globalAccountView) + ")" : "") +
+      (globalAccountView !== "all" ? " (" + accountViewLabel(globalAccountView) + (globalAccountName ? " · " + globalAccountName : "") + ")" : "") +
       ", a " + pct(S.returnPct,0) + " return on the opening balance. The shaded band shows how far equity sat below its high-water mark.";
 
   drawHero(TRADES); drawEquity(TRADES); drawDD(TRADES);
@@ -2575,6 +2686,7 @@ function resetTradeFormMode(){
 function fillTradeForm(t){
   document.getElementById("fDate").value = t.date || "";
   document.getElementById("fAccountType").value = (t.accountType === ACCOUNT_PROP) ? ACCOUNT_PROP : ACCOUNT_LIVE;
+  setAccountPickerMode();
   renderAccountNameSelect();
   const nameSel = document.getElementById("fAccountName");
   if(nameSel && t.accountName){
@@ -2753,6 +2865,8 @@ function setAddTradeOpen(open){
     resetTradeFormMode();
   }
   if(open){
+    // New trade form opens on the current day (unless editing an existing trade)
+    if(!editingTradeId) setTradeFormDateToToday();
     sec.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
@@ -2794,11 +2908,20 @@ document.getElementById("printTradeLogBtn").addEventListener("click", ()=>{
   setTimeout(restore, 1500);
 });
 
+function setTradeFormDateToToday(){
+  const el = document.getElementById("fDate");
+  if(el) el.value = isoDate(new Date());
+}
 function clearTradeFormFields(){
   ["fEntry","fExit","fStopLoss","fSetup","fEntryTime","fExitTime","fNotes"].forEach(id=>{
     const el=document.getElementById(id); if(el) el.value="";
   });
   document.getElementById("fSession").value="";
+  setTradeFormDateToToday();
+  // Clear multi-account ticks before re-render so the next trade starts blank
+  document.querySelectorAll("#fAccountNameMulti input[type=checkbox]").forEach(cb=>{
+    cb.checked = false;
+  });
   renderAccountNameSelect();
   clearScreenshotField();
   editingScreenshot = null;
@@ -2807,10 +2930,10 @@ function clearTradeFormFields(){
 document.getElementById("addBtn").addEventListener("click", async () => {
   const btn = document.getElementById("addBtn");
   const isEdit = !!editingTradeId;
-  const t={
+  const selectedNames = getSelectedAccountNames();
+  const base={
     date:document.getElementById("fDate").value,
     accountType:document.getElementById("fAccountType").value,
-    accountName:(document.getElementById("fAccountName").value || "").trim(),
     symbol:(document.getElementById("fSymbol").value||"XAUUSD").trim().toUpperCase(),
     direction:document.getElementById("fDir").value,
     setup:document.getElementById("fSetup").value.trim(),
@@ -2825,11 +2948,13 @@ document.getElementById("addBtn").addEventListener("click", async () => {
     notes:(document.getElementById("fNotes").value || "").trim(),
     added:true
   };
+  // Validate using a temporary object with accountName so isValidTrade still works
+  const t = {...base, accountName: selectedNames[0] || ""};
   if(!isValidTrade(t)){ flash("Fill in a date, entry price, exit price and a lot size above zero.",false); return; }
-  if(!t.accountName){
-    flash(t.accountType === ACCOUNT_PROP
-      ? "Select a Prop Firm account (add one on the Accounts page first)."
-      : "Select a Live account (add one on the Accounts page first).", false);
+  if(!selectedNames.length){
+    flash(base.accountType === ACCOUNT_PROP
+      ? "Select at least one Prop Firm account (add one on the Accounts page first)."
+      : "Select at least one Live account (add one on the Accounts page first).", false);
     return;
   }
 
@@ -2849,6 +2974,7 @@ document.getElementById("addBtn").addEventListener("click", async () => {
   }
 
   if(isEdit){
+    t.accountName = selectedNames[0];
     if(updateTradeById(editingTradeId, t)){
       flash("Trade updated.", true);
       clearTradeFormFields();
@@ -2856,7 +2982,7 @@ document.getElementById("addBtn").addEventListener("click", async () => {
       setAddTradeOpen(false);
     } else if(file && t.screenshot){
       // retry compressed
-      btn.disabled = true; btn.textContent = "Compressing screenshot\u2026";
+      btn.disabled = true; btn.textContent = "Compressing screenshot…";
       try{
         t.screenshot = await compressImageFallback(file);
         if(updateTradeById(editingTradeId, t)){
@@ -2877,19 +3003,23 @@ document.getElementById("addBtn").addEventListener("click", async () => {
     return;
   }
 
-  if(addTrades([t])){
+  // One journal row per selected account (copy-trade across funded / live books)
+  const batch = selectedNames.map(name => ({...base, accountName: name, screenshot: t.screenshot || null}));
+  if(addTrades(batch)){
     clearTradeFormFields();
     resetTradeFormMode();
     setAddTradeOpen(false);
+    if(batch.length > 1) flash(batch.length + " trades added (one per selected account).", true);
   } else if(t.screenshot && file){
-    btn.disabled = true; btn.textContent = "Compressing screenshot\u2026";
+    btn.disabled = true; btn.textContent = "Compressing screenshot…";
     try{
-      t.screenshot = await compressImageFallback(file);
-      if(addTrades([t])){
+      const shot = await compressImageFallback(file);
+      const batch2 = selectedNames.map(name => ({...base, accountName: name, screenshot: shot}));
+      if(addTrades(batch2)){
         clearTradeFormFields();
         resetTradeFormMode();
         setAddTradeOpen(false);
-        flash("Trade saved. Screenshot was slightly compressed because the original was very large.", true);
+        flash((batch2.length > 1 ? batch2.length + " trades saved" : "Trade saved") + ". Screenshot was slightly compressed because the original was very large.", true);
       }
     }catch(e){
       flash("Screenshot was too large to store in this browser. Trade not saved.", false);
@@ -2897,6 +3027,7 @@ document.getElementById("addBtn").addEventListener("click", async () => {
     btn.disabled = false; btn.textContent = "Add trade";
   }
 });
+
 
 document.getElementById("cancelEditBtn").addEventListener("click", ()=>{
   clearTradeFormFields();
@@ -3285,7 +3416,8 @@ function renderCalendarMonthTotal(){
 
 function renderCalendarPage(){
   if(calYear==null){
-    const ref = TRADES.length ? TRADES[TRADES.length-1].dateObj : new Date();
+    // Always open the journal calendar on the current month/day
+    const ref = new Date();
     calYear = ref.getFullYear();
     calMonth = ref.getMonth();
   }
@@ -3350,8 +3482,35 @@ document.getElementById("calNextBtn").addEventListener("click", ()=>{ calMonth++
 /* ---- global account filter ---- */
 document.getElementById("globalAccountFilter").addEventListener("change",(e)=>{
   globalAccountView = e.target.value;
+  globalAccountName = ""; // reset specific account when switching type
   calYear = null; calMonth = null;
   render();
+});
+document.getElementById("globalAccountNameFilter").addEventListener("change",(e)=>{
+  globalAccountName = e.target.value || "";
+  calYear = null; calMonth = null;
+  render();
+});
+// Click a specific account on the Dashboard starting-balance cards
+document.getElementById("liveStartBalBreakdown").addEventListener("click",(e)=>{
+  const chip = e.target.closest(".dash-bal-acct[data-account-name]");
+  if(!chip) return;
+  selectDashboardAccount(chip.getAttribute("data-account-type"), chip.getAttribute("data-account-name"));
+});
+document.getElementById("propStartBalBreakdown").addEventListener("click",(e)=>{
+  const chip = e.target.closest(".dash-bal-acct[data-account-name]");
+  if(!chip) return;
+  selectDashboardAccount(chip.getAttribute("data-account-type"), chip.getAttribute("data-account-name"));
+});
+document.getElementById("acctSelectAllBtn").addEventListener("click",()=>{
+  document.querySelectorAll("#fAccountNameMulti input[type=checkbox]").forEach(cb=>{
+    cb.checked = true; cb.closest(".acct-check").classList.add("on");
+  });
+});
+document.getElementById("acctSelectNoneBtn").addEventListener("click",()=>{
+  document.querySelectorAll("#fAccountNameMulti input[type=checkbox]").forEach(cb=>{
+    cb.checked = false; cb.closest(".acct-check").classList.remove("on");
+  });
 });
 
 /* ---- account page controls ---- */
@@ -3603,6 +3762,7 @@ document.getElementById("propAccountChipList").addEventListener("click", (e)=>{
 })();
 
 render();
+setTradeFormDateToToday();
 </script>
 </body>
 </html>
