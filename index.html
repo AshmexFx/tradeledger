@@ -2410,18 +2410,48 @@ function renderBreakdowns(){
 
 function tradeGroupKey(t){
   if(t.groupId) return "g:" + t.groupId;
-  // Fallback for older copy-trades saved without a groupId
+  // Fallback for older copy-trades saved without a groupId.
+  // Intentionally excludes lots / entry / exit so different position sizes
+  // on the same copy-trade still group together until a real groupId is assigned.
   return "h:" + [
     t.date,
     (t.symbol || "XAUUSD"),
     t.direction,
-    t.entry, t.exit, t.lots,
     t.setup || "",
     t.session || "",
     t.entryTime || "",
     t.exitTime || "",
-    t.accountType || ACCOUNT_LIVE
+    t.accountType || ACCOUNT_LIVE,
+    // screenshot fingerprint helps separate unrelated same-day same-setup trades
+    (t.screenshot ? String(t.screenshot).slice(0, 48) : "")
   ].join("|");
+}
+/** Persist a shared groupId onto every leg so later lot/price edits cannot split the card. */
+function ensurePersistentGroupId(legs){
+  if(!legs || legs.length < 2) return legs;
+  const existing = legs.map(t => t.groupId).find(Boolean);
+  const groupId = existing || ("grp_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7));
+  const ids = legs.map(t => t.id).filter(Boolean);
+  if(!ids.length) return legs;
+  const needWrite = legs.some(t => t.groupId !== groupId);
+  if(!needWrite) return legs;
+  const added = loadAdded();
+  let changed = false;
+  ids.forEach(id => {
+    const idx = added.findIndex(x => x.id === id);
+    if(idx >= 0 && added[idx].groupId !== groupId){
+      added[idx] = {...added[idx], groupId};
+      changed = true;
+    }
+  });
+  if(changed){
+    saveAdded(added);
+    // Reflect on in-memory derived trades too
+    legs.forEach(t => { t.groupId = groupId; });
+    TRADES.forEach(t => { if(ids.includes(t.id)) t.groupId = groupId; });
+    if(typeof FULL_TRADES !== "undefined") FULL_TRADES.forEach(t => { if(ids.includes(t.id)) t.groupId = groupId; });
+  }
+  return legs;
 }
 function groupTradesForCards(trades){
   const map = new Map();
@@ -2436,10 +2466,12 @@ function groupTradesForCards(trades){
     map.get(key).push(t);
   });
   return order.map(key => {
-    const legs = map.get(key);
+    let legs = map.get(key);
     // Keep legs stable by account name
     legs.sort((a,b) => (a.accountName||"").localeCompare(b.accountName||""));
-    return { key, legs, primary: legs[0] };
+    // Stamp a permanent groupId so later size edits cannot split the card
+    if(legs.length > 1) legs = ensurePersistentGroupId(legs);
+    return { key: legs[0].groupId ? ("g:" + legs[0].groupId) : key, legs, primary: legs[0] };
   });
 }
 function renderLog(){
@@ -2732,7 +2764,11 @@ function updateTradeById(id, patch){
   const added = loadAdded();
   const idx = added.findIndex(t => t.id === id);
   if(idx < 0) return false;
-  added[idx] = {...added[idx], ...patch, id, added:true};
+  const prev = added[idx];
+  // Never drop an existing groupId when patching a single leg
+  const next = {...prev, ...patch, id, added:true};
+  if(prev.groupId && !next.groupId) next.groupId = prev.groupId;
+  added[idx] = next;
   if(saveAdded(added)){
     render();
     return true;
@@ -2825,6 +2861,12 @@ function beginEditTrade(t){
     flash("This trade cannot be edited (missing id). Remove it and add it again.", false);
     return;
   }
+  // Lock the group before editing so a lot/size change cannot un-group the card
+  const siblings = TRADES.filter(x => tradeGroupKey(x) === tradeGroupKey(t) || (t.groupId && x.groupId === t.groupId));
+  if(siblings.length > 1) ensurePersistentGroupId(siblings);
+  // Refresh t from storage in case groupId was just written
+  const refreshed = loadAdded().find(x => x.id === t.id);
+  if(refreshed && refreshed.groupId) t = {...t, groupId: refreshed.groupId};
   editingTradeId = t.id;
   fillTradeForm(t);
   const heading = document.getElementById("addTradeHeading");
@@ -3240,7 +3282,8 @@ function openTradeModal(t, groupLegs){
   const pnl = document.getElementById("tradeModalPnl");
   const grid = document.getElementById("tradeModalGrid");
   const actions = document.getElementById("tradeModalActions");
-  const legs = (groupLegs && groupLegs.length) ? groupLegs : [t];
+  let legs = (groupLegs && groupLegs.length) ? groupLegs : [t];
+  if(legs.length > 1) legs = ensurePersistentGroupId(legs);
   const multi = legs.length > 1;
   const net = round2(sum(legs.map(x => x.pnl)));
   const dirClass = t.direction === "Long" ? "long" : "short";
