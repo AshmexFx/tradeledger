@@ -404,9 +404,17 @@ table.tight th{font-size:.68rem; letter-spacing:0}
 .trade-modal-legs h4{font-size:.78rem; color:var(--ink-3); text-transform:uppercase; letter-spacing:.04em; margin:0 0 8px; font-weight:600}
 .trade-modal-leg-row{
   display:flex; justify-content:space-between; align-items:center; gap:12px;
-  padding:6px 0; border-bottom:1px solid var(--rule-2); font-size:.88rem;
+  padding:8px 0; border-bottom:1px solid var(--rule-2); font-size:.88rem;
+  flex-wrap:wrap;
 }
 .trade-modal-leg-row:last-child{border-bottom:0}
+.trade-modal-leg-main{display:flex; flex-direction:column; gap:2px; min-width:0; flex:1 1 auto}
+.trade-modal-leg-main .leg-name{font-weight:600}
+.trade-modal-leg-main .leg-hint{font-size:.72rem; color:var(--ink-3)}
+.trade-modal-leg-right{display:flex; align-items:center; gap:10px; flex-shrink:0}
+.trade-modal-leg-actions{display:flex; gap:6px}
+.trade-modal-leg-actions .btn{padding:5px 10px; font-size:.75rem}
+.trade-modal-legs .legs-help{font-size:.78rem; color:var(--ink-3); margin:0 0 10px}
 .trade-cards-empty{
   grid-column:1 / -1;
   padding:36px 20px;
@@ -2823,8 +2831,8 @@ function beginEditTrade(t){
   const sub = document.getElementById("addTradeSub");
   const btn = document.getElementById("addBtn");
   const cancelWrap = document.getElementById("cancelEditWrap");
-  if(heading) heading.textContent = "Edit trade";
-  if(sub) sub.textContent = "Change any fields below, then save. Leave the screenshot as-is, or pick a new one.";
+  if(heading) heading.textContent = "Edit trade" + (t.accountName ? (" — " + t.accountName) : "");
+  if(sub) sub.textContent = "Editing only this account’s leg. Change lot size, prices or fees to adjust its P&L. Other accounts in the group stay as they are. Leave the screenshot as-is, or pick a new one.";
   if(btn) btn.textContent = "Save changes";
   if(cancelWrap) cancelWrap.hidden = false;
   closeTradeModal();
@@ -3048,6 +3056,9 @@ document.getElementById("addBtn").addEventListener("click", async () => {
 
   if(isEdit){
     t.accountName = selectedNames[0];
+    // Keep the copy-trade group link so the card stays grouped after a sizing change
+    const existing = loadAdded().find(x => x.id === editingTradeId);
+    if(existing && existing.groupId) t.groupId = existing.groupId;
     if(updateTradeById(editingTradeId, t)){
       flash("Trade updated.", true);
       clearTradeFormFields();
@@ -3275,10 +3286,29 @@ function openTradeModal(t, groupLegs){
   }
   if(multi){
     legsBox.style.display = "block";
-    legsBox.innerHTML = '<h4>Accounts on this trade</h4>' + legs.map(x => {
-      const name = x.accountName || accountLabel(x.accountType || ACCOUNT_LIVE);
-      return '<div class="trade-modal-leg-row"><span>'+esc(name)+'</span><span class="num '+sgn(x.pnl)+'">'+(x.pnl>0?"+":"")+usd(x.pnl)+'</span></div>';
-    }).join("");
+    legsBox.innerHTML =
+      '<h4>Accounts on this trade</h4>'+
+      '<p class="legs-help">Edit one account to change its lot size, prices or P&amp;L. The group stays linked; only that account updates.</p>'+
+      legs.map(x => {
+        const name = x.accountName || accountLabel(x.accountType || ACCOUNT_LIVE);
+        const canEdit = !!x.id;
+        const actions = canEdit
+          ? '<div class="trade-modal-leg-actions">'+
+              '<button type="button" class="btn btn-primary leg-edit-btn" data-leg-id="'+esc(x.id)+'">Edit</button>'+
+              '<button type="button" class="btn leg-delete-btn" data-leg-id="'+esc(x.id)+'" style="border-color:var(--loss);color:var(--loss)">Remove</button>'+
+            '</div>'
+          : '';
+        return '<div class="trade-modal-leg-row" data-leg-id="'+(x.id?esc(x.id):'')+'">'+
+          '<div class="trade-modal-leg-main">'+
+            '<span class="leg-name">'+esc(name)+'</span>'+
+            '<span class="leg-hint">'+x.lots.toFixed(2)+' lots · entry '+x.entry.toFixed(2)+' · exit '+x.exit.toFixed(2)+'</span>'+
+          '</div>'+
+          '<div class="trade-modal-leg-right">'+
+            '<span class="num '+sgn(x.pnl)+'" style="font-weight:700">'+(x.pnl>0?"+":"")+usd(x.pnl)+'</span>'+
+            actions+
+          '</div>'+
+        '</div>';
+      }).join("");
   } else {
     legsBox.style.display = "none";
     legsBox.innerHTML = "";
@@ -3289,7 +3319,15 @@ function openTradeModal(t, groupLegs){
   if(notesWrap) notesWrap.style.display = t.id ? "block" : "none";
   const notesMsg = document.getElementById("tradeNotesMsg");
   if(notesMsg){ notesMsg.className = "msg"; notesMsg.textContent = ""; }
-  if(actions) actions.style.display = t.id ? "flex" : "none";
+  if(actions){
+    actions.style.display = t.id ? "flex" : "none";
+    const editBtn = document.getElementById("editTradeBtn");
+    const delBtn = document.getElementById("deleteTradeBtn");
+    if(editBtn) editBtn.textContent = multi ? "Edit primary account" : "Edit trade";
+    if(delBtn) delBtn.textContent = multi ? "Delete all accounts" : "Delete";
+  }
+  // Stash group leg ids for bulk delete
+  window.__modalGroupLegIds = multi ? legs.filter(x => x.id).map(x => x.id) : [];
   document.getElementById("tradeModal").classList.add("show");
 }
 function closeTradeModal(){
@@ -3329,11 +3367,43 @@ document.getElementById("editTradeBtn").addEventListener("click", ()=>{
 });
 document.getElementById("deleteTradeBtn").addEventListener("click", ()=>{
   if(!modalTradeId) return;
+  const groupIds = (window.__modalGroupLegIds || []).filter(Boolean);
+  if(groupIds.length > 1){
+    if(!confirm("Delete all "+groupIds.length+" accounts in this grouped trade?")) return;
+    closeTradeModal();
+    let ok = true;
+    groupIds.forEach(id => { if(!deleteTradeById(id)) ok = false; });
+    // deleteTradeById already re-renders each time; flash once
+    flash(ok ? "Grouped trade removed from all accounts." : "Could not delete every leg.", ok);
+    return;
+  }
   if(!confirm("Delete this trade permanently from the log?")) return;
   const id = modalTradeId;
   closeTradeModal();
   if(deleteTradeById(id)) flash("Trade deleted.", true);
   else flash("Could not delete the trade.", false);
+});
+// Per-account Edit / Remove inside a grouped trade
+document.getElementById("tradeModal").addEventListener("click", (e) => {
+  const editBtn = e.target.closest(".leg-edit-btn");
+  if(editBtn){
+    e.stopPropagation();
+    const id = editBtn.getAttribute("data-leg-id");
+    const t = TRADES.find(x => x.id === id) || loadAdded().find(x => x.id === id);
+    if(t) beginEditTrade(t);
+    return;
+  }
+  const delBtn = e.target.closest(".leg-delete-btn");
+  if(delBtn){
+    e.stopPropagation();
+    const id = delBtn.getAttribute("data-leg-id");
+    const t = TRADES.find(x => x.id === id) || loadAdded().find(x => x.id === id);
+    const name = t ? (t.accountName || "this account") : "this account";
+    if(!confirm("Remove only “"+name+"” from this grouped trade? Other accounts stay.")) return;
+    closeTradeModal();
+    if(deleteTradeById(id)) flash("Removed “"+name+"” from the group.", true);
+    else flash("Could not remove that account leg.", false);
+  }
 });
 // Click chart in the detail modal → full-screen zoom (lightbox sits above the modal)
 document.getElementById("tradeModalMedia").addEventListener("click", (e) => {
