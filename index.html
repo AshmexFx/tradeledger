@@ -383,12 +383,30 @@ table.tight th{font-size:.68rem; letter-spacing:0}
   padding:2px 7px; border-radius:3px; border:1px solid var(--rule);
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:9rem;
 }
+.trade-card-accts{display:flex; flex-wrap:wrap; gap:4px; min-width:0}
 .trade-card-pnl{font-weight:800; font-size:1.05rem; font-variant-numeric:tabular-nums; white-space:nowrap}
+.trade-card-pnl-sub{font-size:.72rem; color:var(--ink-3); font-weight:500; text-align:right}
 .trade-card-sub{
   display:flex; align-items:center; gap:6px; flex-wrap:wrap;
   font-size:.78rem; color:var(--ink-3);
 }
 .trade-card-sub .sep{opacity:.5}
+.trade-card-legs{
+  margin-top:4px; display:flex; flex-direction:column; gap:3px;
+  font-size:.72rem; color:var(--ink-3);
+}
+.trade-card-leg{
+  display:flex; justify-content:space-between; gap:10px;
+  padding:2px 0; border-top:1px solid var(--rule-2);
+}
+.trade-card-leg .leg-pnl{font-weight:700; font-variant-numeric:tabular-nums}
+.trade-modal-legs{margin-top:14px; border-top:1px solid var(--rule); padding-top:12px}
+.trade-modal-legs h4{font-size:.78rem; color:var(--ink-3); text-transform:uppercase; letter-spacing:.04em; margin:0 0 8px; font-weight:600}
+.trade-modal-leg-row{
+  display:flex; justify-content:space-between; align-items:center; gap:12px;
+  padding:6px 0; border-bottom:1px solid var(--rule-2); font-size:.88rem;
+}
+.trade-modal-leg-row:last-child{border-bottom:0}
 .trade-cards-empty{
   grid-column:1 / -1;
   padding:36px 20px;
@@ -2382,47 +2400,102 @@ function renderBreakdowns(){
   }
 }
 
+function tradeGroupKey(t){
+  if(t.groupId) return "g:" + t.groupId;
+  // Fallback for older copy-trades saved without a groupId
+  return "h:" + [
+    t.date,
+    (t.symbol || "XAUUSD"),
+    t.direction,
+    t.entry, t.exit, t.lots,
+    t.setup || "",
+    t.session || "",
+    t.entryTime || "",
+    t.exitTime || "",
+    t.accountType || ACCOUNT_LIVE
+  ].join("|");
+}
+function groupTradesForCards(trades){
+  const map = new Map();
+  const order = [];
+  // Newest first: walk reversed list so first sighting is the newest group
+  [...trades].reverse().forEach(t => {
+    const key = tradeGroupKey(t);
+    if(!map.has(key)){
+      map.set(key, []);
+      order.push(key);
+    }
+    map.get(key).push(t);
+  });
+  return order.map(key => {
+    const legs = map.get(key);
+    // Keep legs stable by account name
+    legs.sort((a,b) => (a.accountName||"").localeCompare(b.accountName||""));
+    return { key, legs, primary: legs[0] };
+  });
+}
 function renderLog(){
+  const groups = groupTradesForCards(TRADES);
+  const multiGroups = groups.filter(g => g.legs.length > 1).length;
   document.getElementById("logNote").textContent = !S.n
     ? (globalAccountView === "all"
         ? "No closed trades yet. Add your first one below."
         : "No " + accountViewLabel(globalAccountView) + " trades in this view. Switch the filter above or add a trade with that account type.")
     : (globalAccountView === "all" ? "All " : accountViewLabel(globalAccountView) + " · ") +
-      S.n + " closed trades. Click a card for full details." +
+      S.n + " closed trade" + (S.n===1?"":"s") +
+      (multiGroups ? " in " + groups.length + " card" + (groups.length===1?"":"s") + " (copy-trades grouped)" : "") +
+      ". Click a card for full details." +
       (S.addedCount ? " Trades you added in this browser are marked." : "");
 
-  // Visual card grid (newest first, like the reference UI)
+  // Visual card grid (newest first). Copy-trades across accounts share one card.
   const cards = document.getElementById("tradeCards");
   if(cards){
     if(!TRADES.length){
       cards.innerHTML = '<div class="trade-cards-empty">No trades in this view yet. Add one below to see it here.</div>';
     } else {
-      const ordered = [...TRADES].reverse();
-      cards.innerHTML = ordered.map(t => {
+      cards.innerHTML = groups.map(g => {
+        const t = g.primary;
+        const legs = g.legs;
+        const multi = legs.length > 1;
         const dirClass = t.direction === "Long" ? "long" : "short";
         const dirLabel = t.direction === "Long" ? "LONG" : "SHORT";
-        const acct = t.accountName || accountLabel(t.accountType || ACCOUNT_LIVE);
         const setup = t.setup || "No setup";
-        const img = t.screenshot
-          ? '<img src="'+t.screenshot+'" alt="">'
+        const shot = legs.find(x => x.screenshot) || t;
+        const img = shot.screenshot
+          ? '<img src="'+shot.screenshot+'" alt="">'
           : '<div class="no-chart">No chart</div>';
-        return '<article class="trade-card" data-n="'+t.n+'" role="button" tabindex="0" aria-label="Open trade '+esc(t.symbol||"XAUUSD")+' details">'+
+        const net = round2(sum(legs.map(x => x.pnl)));
+        const acctChips = legs.map(x => {
+          const name = x.accountName || accountLabel(x.accountType || ACCOUNT_LIVE);
+          return '<span class="trade-card-acct" title="'+esc(name)+'">'+esc(name)+'</span>';
+        }).join("");
+        const legsHtml = multi
+          ? '<div class="trade-card-legs">'+legs.map(x => {
+              const name = x.accountName || accountLabel(x.accountType || ACCOUNT_LIVE);
+              return '<div class="trade-card-leg"><span>'+esc(name)+'</span><span class="leg-pnl num '+sgn(x.pnl)+'">'+(x.pnl>0?"+":"")+usd(x.pnl)+'</span></div>';
+            }).join("")+'</div>'
+          : '';
+        const pnlBlock = multi
+          ? '<div style="text-align:right"><div class="trade-card-pnl num '+sgn(net)+'">'+(net>0?"+":"")+usd(net)+'</div><div class="trade-card-pnl-sub">'+legs.length+' accounts</div></div>'
+          : '<div class="trade-card-pnl num '+sgn(t.pnl)+'">'+(t.pnl>0?"+":"")+usd(t.pnl)+'</div>';
+        return '<article class="trade-card" data-n="'+t.n+'" data-group-key="'+esc(g.key)+'" role="button" tabindex="0" aria-label="Open trade '+esc(t.symbol||"XAUUSD")+' details">'+
           '<div class="trade-card-img">'+img+'</div>'+
           '<div class="trade-card-body">'+
             '<div class="trade-card-top">'+
               '<div class="trade-card-meta">'+
                 '<span class="trade-card-symbol">'+esc(t.symbol||"XAUUSD")+'</span>'+
                 '<span class="trade-card-dir '+dirClass+'">'+dirLabel+'</span>'+
-                '<span class="trade-card-acct" title="'+esc(acct)+'">'+esc(acct)+'</span>'+
+                '<span class="trade-card-accts">'+acctChips+'</span>'+
                 (t.added ? ' <span class="tag add">added</span>' : '')+
               '</div>'+
-              '<div class="trade-card-pnl num '+sgn(t.pnl)+'">'+(t.pnl>0?"+":"")+usd(t.pnl)+'</div>'+
+              pnlBlock+
             '</div>'+
             '<div class="trade-card-sub">'+
               '<span>'+nice(t.date)+'</span>'+
               '<span class="sep">·</span>'+
               '<span>'+esc(setup)+'</span>'+
             '</div>'+
+            legsHtml+
           '</div>'+
         '</article>';
       }).join("");
@@ -3004,22 +3077,36 @@ document.getElementById("addBtn").addEventListener("click", async () => {
   }
 
   // One journal row per selected account (copy-trade across funded / live books)
-  const batch = selectedNames.map(name => ({...base, accountName: name, screenshot: t.screenshot || null}));
+  // Shared groupId keeps them as one card in the Trade log
+  const groupId = selectedNames.length > 1
+    ? ("grp_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7))
+    : null;
+  const batch = selectedNames.map(name => ({
+    ...base,
+    accountName: name,
+    screenshot: t.screenshot || null,
+    ...(groupId ? { groupId } : {})
+  }));
   if(addTrades(batch)){
     clearTradeFormFields();
     resetTradeFormMode();
     setAddTradeOpen(false);
-    if(batch.length > 1) flash(batch.length + " trades added (one per selected account).", true);
+    if(batch.length > 1) flash(batch.length + " accounts logged as one grouped trade.", true);
   } else if(t.screenshot && file){
     btn.disabled = true; btn.textContent = "Compressing screenshot…";
     try{
       const shot = await compressImageFallback(file);
-      const batch2 = selectedNames.map(name => ({...base, accountName: name, screenshot: shot}));
+      const batch2 = selectedNames.map(name => ({
+        ...base,
+        accountName: name,
+        screenshot: shot,
+        ...(groupId ? { groupId } : {})
+      }));
       if(addTrades(batch2)){
         clearTradeFormFields();
         resetTradeFormMode();
         setAddTradeOpen(false);
-        flash((batch2.length > 1 ? batch2.length + " trades saved" : "Trade saved") + ". Screenshot was slightly compressed because the original was very large.", true);
+        flash((batch2.length > 1 ? batch2.length + " accounts logged as one grouped trade" : "Trade saved") + ". Screenshot was slightly compressed because the original was very large.", true);
       }
     }catch(e){
       flash("Screenshot was too large to store in this browser. Trade not saved.", false);
@@ -3134,7 +3221,7 @@ window.addEventListener("mouseup", () => {
 
 /* ---- trade detail modal ---- */
 let modalTradeId = null;
-function openTradeModal(t){
+function openTradeModal(t, groupLegs){
   if(!t) return;
   modalTradeId = t.id || null;
   const media = document.getElementById("tradeModalMedia");
@@ -3142,13 +3229,17 @@ function openTradeModal(t){
   const pnl = document.getElementById("tradeModalPnl");
   const grid = document.getElementById("tradeModalGrid");
   const actions = document.getElementById("tradeModalActions");
+  const legs = (groupLegs && groupLegs.length) ? groupLegs : [t];
+  const multi = legs.length > 1;
+  const net = round2(sum(legs.map(x => x.pnl)));
   const dirClass = t.direction === "Long" ? "long" : "short";
   const dirLabel = t.direction === "Long" ? "LONG" : "SHORT";
   title.innerHTML = esc(t.symbol||"XAUUSD") +
     ' <span class="trade-card-dir '+dirClass+'">'+dirLabel+'</span>' +
+    (multi ? ' <span class="tag add">'+legs.length+' accounts</span>' : '') +
     (t.added ? ' <span class="tag add">added</span>' : "");
-  pnl.textContent = (t.pnl>0?"+":"") + usd(t.pnl);
-  pnl.className = "trade-modal-pnl num " + sgn(t.pnl);
+  pnl.textContent = (net>0?"+":"") + usd(net);
+  pnl.className = "trade-modal-pnl num " + sgn(net);
   media.innerHTML = t.screenshot
     ? '<img src="'+t.screenshot+'" alt="Trade chart" data-zoom-src="'+t.screenshot+'" title="Click to zoom">'+
       '<span class="zoom-hint">Click image to zoom</span>'
@@ -3174,6 +3265,24 @@ function openTradeModal(t){
   grid.innerHTML = rows.map(r =>
     '<div><div class="k">'+esc(r[0])+'</div><div class="v">'+r[1]+'</div></div>'
   ).join("");
+  // Per-account breakdown for grouped copy-trades
+  let legsBox = document.getElementById("tradeModalLegs");
+  if(!legsBox){
+    legsBox = document.createElement("div");
+    legsBox.id = "tradeModalLegs";
+    legsBox.className = "trade-modal-legs";
+    grid.parentNode.insertBefore(legsBox, grid.nextSibling);
+  }
+  if(multi){
+    legsBox.style.display = "block";
+    legsBox.innerHTML = '<h4>Accounts on this trade</h4>' + legs.map(x => {
+      const name = x.accountName || accountLabel(x.accountType || ACCOUNT_LIVE);
+      return '<div class="trade-modal-leg-row"><span>'+esc(name)+'</span><span class="num '+sgn(x.pnl)+'">'+(x.pnl>0?"+":"")+usd(x.pnl)+'</span></div>';
+    }).join("");
+  } else {
+    legsBox.style.display = "none";
+    legsBox.innerHTML = "";
+  }
   const notesArea = document.getElementById("tradeModalNotes");
   const notesWrap = document.getElementById("tradeModalNotesWrap");
   if(notesArea) notesArea.value = t.notes || "";
@@ -3242,21 +3351,28 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+function openTradeCardFromEl(card){
+  if(!card) return;
+  const key = card.getAttribute("data-group-key");
+  const n = parseInt(card.dataset.n, 10);
+  const t = TRADES.find(x => x.n === n);
+  if(!t) return;
+  const legs = key
+    ? TRADES.filter(x => tradeGroupKey(x) === key)
+    : [t];
+  openTradeModal(t, legs);
+}
 document.getElementById("tradeCards").addEventListener("click", (e) => {
   const card = e.target.closest(".trade-card");
   if(!card) return;
-  const n = parseInt(card.dataset.n, 10);
-  const t = TRADES.find(x => x.n === n);
-  if(t) openTradeModal(t);
+  openTradeCardFromEl(card);
 });
 document.getElementById("tradeCards").addEventListener("keydown", (e) => {
   if(e.key !== "Enter" && e.key !== " ") return;
   const card = e.target.closest(".trade-card");
   if(!card) return;
   e.preventDefault();
-  const n = parseInt(card.dataset.n, 10);
-  const t = TRADES.find(x => x.n === n);
-  if(t) openTradeModal(t);
+  openTradeCardFromEl(card);
 });
 
 document.querySelector("#tradeTable tbody").addEventListener("click", (e) => {
