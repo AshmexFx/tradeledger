@@ -828,6 +828,13 @@ table.tight th{font-size:.68rem; letter-spacing:0}
           <label for="newPropMaxLoss">Max loss limit %</label>
           <input type="number" id="newPropMaxLoss" step="0.1" min="0" max="100" value="10" placeholder="10">
         </div>
+        <div style="max-width:200px">
+          <label for="newPropMaxLossMode">Max loss type</label>
+          <select id="newPropMaxLossMode">
+            <option value="static">Static (from start)</option>
+            <option value="trailingEod">Trailing EOD</option>
+          </select>
+        </div>
         <div style="max-width:140px">
           <label for="newPropProfitTarget">Profit target %</label>
           <input type="number" id="newPropProfitTarget" step="0.1" min="0" max="100" value="10" placeholder="10">
@@ -836,7 +843,7 @@ table.tight th{font-size:.68rem; letter-spacing:0}
           <button class="btn btn-primary" id="addPropAccountBtn" type="button">Save account</button>
         </div>
       </div>
-      <p style="font-size:.8rem; color:var(--ink-3); margin:0 0 12px">Limits use this account’s starting balance. Re-save the same name to update.</p>
+      <p style="font-size:.8rem; color:var(--ink-3); margin:0 0 12px">Limits use this account’s starting balance. <strong>Trailing EOD</strong> moves the max-loss floor up with each new end-of-day equity high (e.g. a $1,000 buffer trails the best closed day). Static keeps the floor fixed from start. Re-save the same name to update.</p>
       <div class="msg" id="propAccountMsg"></div>
     </div>
     <div id="propAccountChipList" class="no-print" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px"></div>
@@ -844,7 +851,7 @@ table.tight th{font-size:.68rem; letter-spacing:0}
       <table class="tight" id="propAccountTable">
         <thead><tr>
           <th class="l">Account</th><th>Trades</th><th>Net P&amp;L</th>
-          <th>Daily loss</th><th>Max loss</th><th>Profit target</th><th class="l">Status</th>
+          <th>Daily loss</th><th>Max loss / floor</th><th>Profit target</th><th class="l">Status</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -1229,16 +1236,18 @@ function normalizePropAccount(item){
   if(typeof item === "string"){
     const name = item.trim();
     if(!name) return null;
-    return { name, startBalance: 0, dailyLossPct: 5, maxLossPct: 10, profitTargetPct: 10 };
+    return { name, startBalance: 0, dailyLossPct: 5, maxLossPct: 10, maxLossMode: "static", profitTargetPct: 10 };
   }
   if(!item || typeof item !== "object") return null;
   const name = String(item.name || "").trim();
   if(!name) return null;
+  const mode = (item.maxLossMode === "trailingEod") ? "trailingEod" : "static";
   return {
     name,
     startBalance: numOr(item.startBalance, 0),
     dailyLossPct: numOr(item.dailyLossPct, 5),
     maxLossPct: numOr(item.maxLossPct, 10),
+    maxLossMode: mode,
     profitTargetPct: numOr(item.profitTargetPct, 10)
   };
 }
@@ -1328,7 +1337,7 @@ function renderPropAccountChips(){
     chips.innerHTML = '<span style="font-size:.8rem;color:var(--ink-3)">No prop firm accounts yet — add one above.</span>';
   } else {
     chips.innerHTML = list.map(a =>
-      '<span class="setup-chip" title="Start '+usd(a.startBalance)+' · Daily '+a.dailyLossPct+'% · Max '+a.maxLossPct+'% · Target '+a.profitTargetPct+'%">'+esc(a.name)+
+      '<span class="setup-chip" title="Start '+usd(a.startBalance)+' · Daily '+a.dailyLossPct+'% · Max '+a.maxLossPct+'% ('+(a.maxLossMode==='trailingEod'?'Trailing EOD':'Static')+') · Target '+a.profitTargetPct+'%">'+esc(a.name)+
       ' <span style="color:var(--ink-3);font-size:.72rem">'+usd(a.startBalance)+'</span>'+
       '<button type="button" data-prop-account="'+esc(a.name)+'" title="Remove account" aria-label="Remove '+esc(a.name)+'">&times;</button></span>'
     ).join("");
@@ -1457,12 +1466,13 @@ function computePropLimitStats(account, trades, startBal){
   const dailyLimitPct = account.dailyLossPct || 0;
   const maxLossPct = account.maxLossPct || 0;
   const targetPct = account.profitTargetPct || 0;
+  const trailing = account.maxLossMode === "trailingEod";
   const dailyLimit$ = start * dailyLimitPct / 100;
-  const maxLoss$ = start * maxLossPct / 100;
+  const maxLoss$ = start * maxLossPct / 100; // buffer size (also the trail distance)
   const target$ = start * targetPct / 100;
   const net = round2(sum(trades.map(t => t.pnl)));
   const equity = round2(start + net);
-  // Worst single calendar day (most negative day P&L)
+
   const byDay = new Map();
   trades.forEach(t => {
     byDay.set(t.date, round2((byDay.get(t.date) || 0) + t.pnl));
@@ -1473,17 +1483,49 @@ function computePropLimitStats(account, trades, startBal){
   });
   const dayLossUsed = worstDay < 0 ? Math.abs(worstDay) : 0;
   const dayLossPctUsed = dailyLimit$ > 0 ? (dayLossUsed / dailyLimit$) * 100 : 0;
-  // Loss from starting balance (only counts when equity is below start)
+
+  // Static: floor fixed at start - buffer.
+  // Trailing EOD: after each closed day, if equity is a new high, floor = HWM - buffer.
+  let floor = round2(start - maxLoss$);
+  let hwmEod = start;
+  let trailBreached = false;
+  if(trailing && maxLoss$ > 0){
+    const days = [...byDay.keys()].sort();
+    let eq = start;
+    floor = round2(start - maxLoss$);
+    hwmEod = start;
+    days.forEach(d => {
+      eq = round2(eq + byDay.get(d));
+      if(eq < floor - 1e-9) trailBreached = true;
+      if(eq > hwmEod){
+        hwmEod = eq;
+        floor = round2(hwmEod - maxLoss$);
+      }
+    });
+  }
+
   const lossFromStart = net < 0 ? Math.abs(net) : 0;
-  const maxLossPctUsed = maxLoss$ > 0 ? (lossFromStart / maxLoss$) * 100 : 0;
+  const distanceToFloor = maxLoss$ > 0 ? round2(equity - floor) : 0;
+  const bufferUsed = maxLoss$ > 0 ? round2(Math.max(0, maxLoss$ - Math.max(0, distanceToFloor))) : 0;
+  const maxLossPctUsed = maxLoss$ > 0
+    ? (trailing ? Math.min(999, (bufferUsed / maxLoss$) * 100) : (lossFromStart / maxLoss$) * 100)
+    : 0;
+
   const profit = net > 0 ? net : 0;
   const targetPctUsed = target$ > 0 ? (profit / target$) * 100 : 0;
   let status = "On track";
   let statusClass = "good";
-  if(maxLoss$ > 0 && lossFromStart >= maxLoss$){ status = "Max loss hit"; statusClass = "warn"; }
-  else if(dailyLimit$ > 0 && dayLossUsed >= dailyLimit$){ status = "Daily limit hit"; statusClass = "warn"; }
-  else if(target$ > 0 && profit >= target$){ status = "Target reached"; statusClass = "good"; }
-  else if(net < 0){ status = "In drawdown"; statusClass = "note"; }
+  if(trailing){
+    if(maxLoss$ > 0 && (trailBreached || equity <= floor)){ status = "Trailing DD hit"; statusClass = "warn"; }
+    else if(dailyLimit$ > 0 && dayLossUsed >= dailyLimit$){ status = "Daily limit hit"; statusClass = "warn"; }
+    else if(target$ > 0 && profit >= target$){ status = "Target reached"; statusClass = "good"; }
+    else if(equity < hwmEod){ status = "In trailing DD"; statusClass = "note"; }
+  } else {
+    if(maxLoss$ > 0 && lossFromStart >= maxLoss$){ status = "Max loss hit"; statusClass = "warn"; }
+    else if(dailyLimit$ > 0 && dayLossUsed >= dailyLimit$){ status = "Daily limit hit"; statusClass = "warn"; }
+    else if(target$ > 0 && profit >= target$){ status = "Target reached"; statusClass = "good"; }
+    else if(net < 0){ status = "In drawdown"; statusClass = "note"; }
+  }
   return {
     net, equity, trades: trades.length,
     dailyLimit$, maxLoss$, target$,
@@ -1491,7 +1533,8 @@ function computePropLimitStats(account, trades, startBal){
     lossFromStart, maxLossPctUsed,
     profit, targetPctUsed,
     status, statusClass,
-    wins: trades.filter(t => t.pnl > 0).length
+    wins: trades.filter(t => t.pnl > 0).length,
+    trailing, floor, hwmEod, distanceToFloor
   };
 }
 function limitBar(pctUsed, kind){
@@ -2179,7 +2222,9 @@ function renderPropAccountTable(){
     const dayLabel = s.worstDayDate
       ? usd(-s.dayLossUsed) + " / " + usd(s.dailyLimit$) + " (" + pct(Math.min(s.dayLossPctUsed, 999)) + " used)"
       : "— / " + usd(s.dailyLimit$);
-    const maxLabel = usd(-s.lossFromStart) + " / " + usd(s.maxLoss$) + " (" + pct(Math.min(s.maxLossPctUsed, 999)) + " used)";
+    const maxLabel = s.trailing
+      ? ("Floor " + usd(s.floor) + " · HWM " + usd(s.hwmEod) + " · " + pct(Math.min(s.maxLossPctUsed, 999)) + " of trail used")
+      : (usd(-s.lossFromStart) + " / " + usd(s.maxLoss$) + " (" + pct(Math.min(s.maxLossPctUsed, 999)) + " used)");
     const tgtLabel = usd(s.profit) + " / " + usd(s.target$) + " (" + pct(Math.min(s.targetPctUsed, 999)) + ")";
     rows.push(
       "<tr><td class='l'>"+esc(acc.name)+"</td><td>"+s.trades+"</td>"+
@@ -3776,10 +3821,12 @@ function resetPropAccountFormFields(){
   const sb = document.getElementById("newPropStartBal");
   const d = document.getElementById("newPropDailyLoss");
   const m = document.getElementById("newPropMaxLoss");
+  const mode = document.getElementById("newPropMaxLossMode");
   const p = document.getElementById("newPropProfitTarget");
   if(sb) sb.value = "0";
   if(d) d.value = "5";
   if(m) m.value = "10";
+  if(mode) mode.value = "static";
   if(p) p.value = "10";
   const heading = document.getElementById("propAccountFormHeading");
   if(heading) heading.textContent = "Add prop firm account";
@@ -3826,6 +3873,7 @@ document.getElementById("addPropAccountBtn").addEventListener("click", ()=>{
   const startBalance = parseFloat(document.getElementById("newPropStartBal").value);
   const dailyLossPct = parseFloat(document.getElementById("newPropDailyLoss").value);
   const maxLossPct = parseFloat(document.getElementById("newPropMaxLoss").value);
+  const maxLossMode = document.getElementById("newPropMaxLossMode").value === "trailingEod" ? "trailingEod" : "static";
   const profitTargetPct = parseFloat(document.getElementById("newPropProfitTarget").value);
   if(!isFinite(startBalance) || startBalance < 0){ propAccountFlash("Enter a valid starting balance.", false); return; }
   if(!isFinite(dailyLossPct) || dailyLossPct < 0){ propAccountFlash("Enter a valid daily loss limit %.", false); return; }
@@ -3833,7 +3881,7 @@ document.getElementById("addPropAccountBtn").addEventListener("click", ()=>{
   if(!isFinite(profitTargetPct) || profitTargetPct < 0){ propAccountFlash("Enter a valid profit target %.", false); return; }
   const list = loadPropAccounts();
   const existing = list.findIndex(a => a.name.toLowerCase() === name.toLowerCase());
-  const account = { name, startBalance, dailyLossPct, maxLossPct, profitTargetPct };
+  const account = { name, startBalance, dailyLossPct, maxLossPct, maxLossMode, profitTargetPct };
   if(existing >= 0){
     list[existing] = account;
     if(savePropAccounts(list)){
@@ -3956,6 +4004,8 @@ document.getElementById("propAccountChipList").addEventListener("click", (e)=>{
   document.getElementById("newPropStartBal").value = acc.startBalance;
   document.getElementById("newPropDailyLoss").value = acc.dailyLossPct;
   document.getElementById("newPropMaxLoss").value = acc.maxLossPct;
+  const modeEl = document.getElementById("newPropMaxLossMode");
+  if(modeEl) modeEl.value = acc.maxLossMode === "trailingEod" ? "trailingEod" : "static";
   document.getElementById("newPropProfitTarget").value = acc.profitTargetPct;
   const heading = document.getElementById("propAccountFormHeading");
   if(heading) heading.textContent = "Edit prop firm account";
